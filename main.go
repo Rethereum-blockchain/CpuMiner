@@ -7,11 +7,11 @@ import (
 )
 
 func main() {
-	//if len(os.Args) < 3 {
-	//	println("Usage: cpuminer [rpcUrl] [threads]")
-	//	return
-	//}
+	if len(os.Args) < 3 {
+		println("Usage: cpuminer [rpcUrl] [threads]")
+		return
+	}
 	// 获取命令行参数
-	ethash.Start(os.Args[1])
+	ethash.Start(os.Args[1], os.Args[2])
 	sys.WaitQuit()
 }

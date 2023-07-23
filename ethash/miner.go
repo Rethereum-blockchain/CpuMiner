@@ -13,11 +13,13 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"time"
 )
 
 var rpcUrl string
 var cpuHash *Ethash
+var globalThreads int
 
 type RpcReback struct {
 	Jsonrpc string   `json:"jsonrpc"`
@@ -58,7 +60,8 @@ func InitConfig(currConfig *Config) {
 	}
 }
 
-func Start(url string) {
+func Start(url string, threads string) {
+	globalThreads, _ = strconv.Atoi(threads)
 	rpcUrl = url
 	log.Println("Starting cpu Ethash-B3 mining, Connected RPC url:", rpcUrl)
 	getWork := make(chan Work)
@@ -80,7 +83,7 @@ func StartMiner(getWork chan Work, submitWork chan *types.Block) {
 		DatasetsLockMmap: false,
 	}
 	InitConfig(&newConfig)
-	cpuHash = New(newConfig, nil, false)
+	cpuHash = New(newConfig, nil, false, globalThreads)
 	defer func(cpuHash *Ethash) {
 		err := cpuHash.Close()
 		if err != nil {
