@@ -2,8 +2,9 @@ package main
 
 import (
 	"ethashcpu/ethash"
-	sys "github.com/panglove/BaseServer/util/os"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
 func main() {
@@ -13,5 +14,8 @@ func main() {
 	}
 	// 获取命令行参数
 	ethash.Start(os.Args[1], os.Args[2])
-	sys.WaitQuit()
+
+	sc := make(chan os.Signal, 1)
+	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
+	<-sc
 }

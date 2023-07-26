@@ -6,7 +6,7 @@ import (
 	"ethashcpu/util"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -27,6 +27,12 @@ type RpcReback struct {
 	Id      int      `json:"id"`
 }
 
+type WorkResult struct {
+	Jsonrpc string `json:"jsonrpc"`
+	Result  bool   `json:"result"`
+	Id      int    `json:"id"`
+}
+
 type RpcInfo struct {
 	Jsonrpc string   `json:"jsonrpc"`
 	Method  string   `json:""`
@@ -41,11 +47,13 @@ type Work struct {
 
 func InitConfig(currConfig *Config) {
 	home := os.Getenv("HOME")
+
 	if home == "" {
 		if user, err := user.Current(); err == nil {
 			home = user.HomeDir
 		}
 	}
+
 	if runtime.GOOS == "darwin" {
 		currConfig.DatasetDir = filepath.Join(home, "Library", "Ethash-B3")
 	} else if runtime.GOOS == "windows" {
@@ -63,13 +71,11 @@ func InitConfig(currConfig *Config) {
 func Start(url string, threads string) {
 	globalThreads, _ = strconv.Atoi(threads)
 	rpcUrl = url
-	log.Println("Starting cpu Ethash-B3 mining, Connected RPC url:", rpcUrl)
+	log.Println("Starting CPU Ethash-B3 mining. Connected RPC URL:", rpcUrl)
 	getWork := make(chan Work)
 	submitWork := make(chan *types.Block)
 
-	go func() {
-		StartMiner(getWork, submitWork)
-	}()
+	StartMiner(getWork, submitWork)
 }
 
 func StartMiner(getWork chan Work, submitWork chan *types.Block) {
@@ -94,40 +100,42 @@ func StartMiner(getWork chan Work, submitWork chan *types.Block) {
 	stop := make(chan int)
 	currentBlock := new(Work)
 	getWorkTimer := time.NewTicker(5 * time.Second)
-	first := false
+	first := true
 
 	go func() {
 		for {
 			select {
 			case work := <-getWork:
 				currentBlock = &work
-				log.Println("Mining block", work.Header.Number, work.Header.Difficulty, work.Hash)
 
-				go func() {
-					if first {
-						go func() {
-							stop <- 1
-						}()
-					}
-					first = true
-					err := cpuHash.Seal(nil, types.NewBlockWithHeader(work.Header), submitWork, stop, common.HexToHash(work.Hash))
-					if err != nil {
-						log.Fatalf("failed to seal block: %v", err)
-						return
-					}
-				}()
+				log.Println("Mining block:", work.Header.Number, "| Difficulty:", work.Header.Difficulty)
+
+				if !first {
+					stop <- 1
+				}
+
+				first = false
+				err := cpuHash.Seal(nil, types.NewBlockWithHeader(work.Header), submitWork, stop, common.HexToHash(work.Hash))
+
+				if err != nil {
+					log.Fatalf("failed to seal block: %v", err)
+					return
+				}
 			case block := <-submitWork:
 				currentBlock.Header.Nonce = types.EncodeNonce(block.Nonce())
 				currentBlock.Header.MixDigest = block.MixDigest()
 				nonce, _ := currentBlock.Header.Nonce.MarshalText()
 				mix, _ := currentBlock.Header.MixDigest.MarshalText()
-				log.Println(string(nonce), string(mix))
-				SubmitWork(string(nonce), currentBlock.Hash, string(mix))
+				SubmitWork(string(nonce), currentBlock.Hash, string(mix), *currentBlock.Header)
+
+				first = true
 
 				header, hash := GetWorkHead()
+
 				if header == nil {
 					return
 				}
+
 				go func() {
 					getWork <- Work{Header: header, Hash: hash}
 				}()
@@ -142,7 +150,6 @@ func StartMiner(getWork chan Work, submitWork chan *types.Block) {
 					continue
 				}
 
-				//stop <- 1
 				go func() {
 					getWork <- Work{Header: header, Hash: hash}
 				}()
@@ -154,12 +161,13 @@ func StartMiner(getWork chan Work, submitWork chan *types.Block) {
 	if header == nil {
 		return
 	}
+
 	getWork <- Work{Header: header, Hash: hash}
 }
 
-func SubmitWork(nonce string, blockHash string, mixHash string) {
+func SubmitWork(nonce string, blockHash string, mixHash string, currentBlock types.Header) {
+	log.Println("Submitting work for block", currentBlock.Number)
 	getWorkInfo := RpcInfo{Method: "eth_submitWork", Params: []string{nonce, blockHash, mixHash}, Id: 1, Jsonrpc: "2.0"}
-	log.Println("Submit work:", getWorkInfo.Params)
 	getWorkInfoBuffs, _ := json.Marshal(getWorkInfo)
 
 	req, err := http.NewRequest("POST", rpcUrl, bytes.NewBuffer(getWorkInfoBuffs))
@@ -171,9 +179,17 @@ func SubmitWork(nonce string, blockHash string, mixHash string) {
 		log.Println(err)
 	}
 	defer resp.Body.Close()
-	body, _ := ioutil.ReadAll(resp.Body)
+	body, _ := io.ReadAll(resp.Body)
 
-	log.Println("Submit reback", string(body))
+	workResult := new(WorkResult)
+
+	json.Unmarshal(body, workResult)
+
+	if workResult.Result {
+		log.Println("Work successfully submitted.")
+	} else {
+		log.Println("Invalid work block.")
+	}
 }
 
 func GetWorkHead() (*types.Header, string) {
@@ -185,14 +201,21 @@ func GetWorkHead() (*types.Header, string) {
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
+
 	if err != nil {
 		return nil, ""
 	}
+
 	defer resp.Body.Close()
-	body, _ := ioutil.ReadAll(resp.Body)
+	body, _ := io.ReadAll(resp.Body)
 	workReback := new(RpcReback)
 
 	json.Unmarshal(body, workReback)
+
+	if len(workReback.Result) != 4 {
+		log.Println("Mining not enabled on Geth.")
+		os.Exit(1)
+	}
 
 	newHeader := new(types.Header)
 	newHeader.Number = util.HexToBig(workReback.Result[3])
