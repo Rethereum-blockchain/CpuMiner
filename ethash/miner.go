@@ -8,6 +8,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"os"
 	"os/user"
@@ -20,6 +21,7 @@ import (
 var rpcUrl string
 var cpuHash *Ethash
 var globalThreads int
+var walletAddress string
 
 type RpcReback struct {
 	Jsonrpc string   `json:"jsonrpc"`
@@ -35,7 +37,7 @@ type WorkResult struct {
 
 type RpcInfo struct {
 	Jsonrpc string   `json:"jsonrpc"`
-	Method  string   `json:""`
+	Method  string   `json:"method"`
 	Params  []string `json:"params"`
 	Id      int      `json:"id"`
 }
@@ -68,10 +70,17 @@ func InitConfig(currConfig *Config) {
 	}
 }
 
-func Start(url string, threads string) {
+func Start(url string, threads string, address string) {
 	globalThreads, _ = strconv.Atoi(threads)
 	rpcUrl = url
-	log.Println("Starting CPU Ethash-B3 mining. Connected RPC URL:", rpcUrl)
+	walletAddress = address
+
+	if walletAddress == "" {
+		log.Println("Starting CPU Ethash-B3 mining. Connected RPC URL:", rpcUrl)
+	} else {
+		log.Println("Starting CPU Ethash-B3 mining. Connected RPC URL:", rpcUrl, "with address:", walletAddress)
+	}
+
 	getWork := make(chan Work)
 	submitWork := make(chan *types.Block)
 
@@ -98,7 +107,7 @@ func StartMiner(getWork chan Work, submitWork chan *types.Block) {
 	}(cpuHash)
 
 	stop := make(chan int)
-	currentBlock := new(Work)
+	currentBlock := Work{Header: &types.Header{Number: new(big.Int)}}
 	getWorkTimer := time.NewTicker(5 * time.Second)
 	first := true
 
@@ -106,9 +115,10 @@ func StartMiner(getWork chan Work, submitWork chan *types.Block) {
 		for {
 			select {
 			case work := <-getWork:
-				currentBlock = &work
-
-				log.Println("Mining block:", work.Header.Number, "| Difficulty:", work.Header.Difficulty)
+				if work.Header.Number.Cmp(currentBlock.Header.Number) != 0 {
+					log.Println("New Job:", work.Header.Number, "| Difficulty:", work.Header.Difficulty)
+					currentBlock = work
+				}
 
 				if !first {
 					stop <- 1
@@ -129,21 +139,32 @@ func StartMiner(getWork chan Work, submitWork chan *types.Block) {
 				SubmitWork(string(nonce), currentBlock.Hash, string(mix), *currentBlock.Header)
 
 				first = true
+				foundWork := false
 
-				header, hash := GetWorkHead()
+				// Re-try connection for 10 seconds if unable to get work
+				for i := 0; i < 10; i++ {
+					header, hash := GetWorkHead()
 
-				if header == nil {
-					return
+					if header != nil {
+						go func() {
+							getWork <- Work{Header: header, Hash: hash}
+						}()
+						foundWork = true
+						break
+					}
+
+					time.Sleep(1 * time.Second)
 				}
 
-				go func() {
-					getWork <- Work{Header: header, Hash: hash}
-				}()
+				if !foundWork {
+					log.Println("Unable to find job. Exiting.")
+					os.Exit(1)
+				}
 
 			case <-getWorkTimer.C:
 				header, hash := GetWorkHead()
 				if header == nil {
-					return
+					continue
 				}
 
 				if hash == currentBlock.Hash {
@@ -166,11 +187,17 @@ func StartMiner(getWork chan Work, submitWork chan *types.Block) {
 }
 
 func SubmitWork(nonce string, blockHash string, mixHash string, currentBlock types.Header) {
-	log.Println("Submitting work for block", currentBlock.Number)
 	getWorkInfo := RpcInfo{Method: "eth_submitWork", Params: []string{nonce, blockHash, mixHash}, Id: 1, Jsonrpc: "2.0"}
 	getWorkInfoBuffs, _ := json.Marshal(getWorkInfo)
 
-	req, err := http.NewRequest("POST", rpcUrl, bytes.NewBuffer(getWorkInfoBuffs))
+	req := new(http.Request)
+
+	if walletAddress == "" {
+		req, _ = http.NewRequest("POST", rpcUrl, bytes.NewBuffer(getWorkInfoBuffs))
+	} else {
+		req, _ = http.NewRequest("POST", rpcUrl+"/"+walletAddress+"/1", bytes.NewBuffer(getWorkInfoBuffs))
+	}
+
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{}
@@ -186,9 +213,9 @@ func SubmitWork(nonce string, blockHash string, mixHash string, currentBlock typ
 	json.Unmarshal(body, workResult)
 
 	if workResult.Result {
-		log.Println("Work successfully submitted.")
+		log.Println("Job submitted.")
 	} else {
-		log.Println("Invalid work block.")
+		log.Println("Job rejected.")
 	}
 }
 
@@ -196,7 +223,14 @@ func GetWorkHead() (*types.Header, string) {
 	getWorkInfo := RpcInfo{Method: "eth_getWork", Params: []string{}, Id: 1, Jsonrpc: "2.0"}
 	getWorkInfoBuffs, _ := json.Marshal(getWorkInfo)
 
-	req, err := http.NewRequest("POST", rpcUrl, bytes.NewBuffer(getWorkInfoBuffs))
+	req := new(http.Request)
+
+	if walletAddress == "" {
+		req, _ = http.NewRequest("POST", rpcUrl, bytes.NewBuffer(getWorkInfoBuffs))
+	} else {
+		req, _ = http.NewRequest("POST", rpcUrl+"/"+walletAddress+"/1", bytes.NewBuffer(getWorkInfoBuffs))
+	}
+
 	req.Header.Set("Content-Type", "application/json")
 
 	client := &http.Client{}

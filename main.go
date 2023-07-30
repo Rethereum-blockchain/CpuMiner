@@ -12,8 +12,14 @@ func main() {
 		println("Usage: cpuminer [rpcUrl] [threads]")
 		return
 	}
-	// 获取命令行参数
-	ethash.Start(os.Args[1], os.Args[2])
+
+	thirdArg := ""
+
+	if len(os.Args) == 4 {
+		thirdArg = os.Args[3]
+	}
+
+	ethash.Start(os.Args[1], os.Args[2], thirdArg)
 
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
